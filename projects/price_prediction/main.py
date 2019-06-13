@@ -7,6 +7,7 @@ import datetime
 import locale
 import requests
 import json
+import statsmodels.api as sm
 
 class DataPreparingTask(luigi.Task):
     calendar_csv_filename = luigi.Parameter()
@@ -106,11 +107,22 @@ class CreateModelTask(luigi.Task):
         return DataPreparingTask()
 
     def run(self):
-        return
+        with open(self.input().path, 'rb') as f:
+            dt_intermediate = pickle.load(f)
+
+        y = dt_intermediate['price_amount']
+        X = dt_intermediate.drop('price_amount', axis=1)
+
+        # 
+        mod = sm.OLS(y, sm.add_constant(X))
+        result = mod.fit()
+        # predict = result.predict(X)
+
+        print(result.summary())
 
     def output(self):
         return
 
 
 if __name__ == '__main__':
-    luigi.run(['DataPreparingTask', '--workers', '1', '--local-scheduler'])
+    luigi.run(['CreateModelTask', '--workers', '1', '--local-scheduler'])
