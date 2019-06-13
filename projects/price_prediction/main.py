@@ -63,10 +63,10 @@ class DataPreparingTask(luigi.Task):
         df_listing = df_listing.loc[:, use_columns_in_listing]
         df_listing = df_listing.rename(columns={'id': 'listing_id'})
 
-        # latitude, longitude
-        # Google Places API
+        # latitude, longitude(Google Places API)
         radius = '300'
         language = 'en'
+        # listing_data_frame.apply(lambda row: get_neighborhood(row.latitude, row.longitude), axis=1)
         for index, row in df_listing.iterrows():
             response = requests.get(self.google_places_api_url + 
                         'key=' + self.api_key + 
@@ -96,6 +96,10 @@ class DataPreparingTask(luigi.Task):
 
     def output(self):
         return luigi.LocalTarget(self.intermediate_data_path)
+
+    def get_neighborhood(lat, lon):
+        # I can apply a function to rows of a dataframe
+        return
 
 class CreateModelTask(luigi.Task):
     def requires(self):
