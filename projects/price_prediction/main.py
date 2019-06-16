@@ -4,18 +4,27 @@ import numpy as np
 import luigi
 import pickle
 import datetime
+import time
 import locale
 import requests
 import json
 import statsmodels.api as sm
+import os
 
 class DataPreparingTask(luigi.Task):
     calendar_csv_filename = luigi.Parameter()
     listings_csv_filename = luigi.Parameter()
-    using_cols = luigi.Parameter()
     intermediate_data_path = luigi.Parameter()
+    intermediate_data_file = luigi.Parameter()
+    neighborhood_data_file = luigi.Parameter()
+    intermediate_data_with_neighborhood_file = luigi.Parameter()
     google_places_api_url = luigi.Parameter()
     api_key = luigi.Parameter()
+    radius = '300'
+    language = 'en'
+
+    def output(self):
+        return luigi.LocalTarget(self.intermediate_data_path + self.intermediate_data_file + '.pkl')
 
     def run(self):
         df_calendar = pd.read_csv(self.calendar_csv_filename)
@@ -63,28 +72,13 @@ class DataPreparingTask(luigi.Task):
         ]
         df_listing = df_listing.loc[:, use_columns_in_listing]
         df_listing = df_listing.rename(columns={'id': 'listing_id'})
-
-        # latitude, longitude(Google Places API)
-        radius = '300'
-        language = 'en'
-        # listing_data_frame.apply(lambda row: get_neighborhood(row.latitude, row.longitude), axis=1)
-        for index, row in df_listing.iterrows():
-            response = requests.get(self.google_places_api_url + 
-                        'key=' + self.api_key + 
-                        '&location=' + str(row.latitude) + ',' + str(row.longitude) + 
-                        '&radius=' + radius + 
-                        '&language=' + language)
-            data = response.json()
-            for result in data['results']:
-                if not result['types'][0] in df_listing.columns:
-                    df_listing[result['types'][0]] = 0
-                df_listing.loc[index, result['types'][0]] += 1
-
-        # property_type, room_type, cancellation_policy
-        df_listing = pd.get_dummies(df_listing, columns=['property_type', 'room_type', 'cancellation_policy'])
-
+        df_listing = self.__getGooglePlaceData(df_listing)
+        
         del df_listing['latitude']
         del df_listing['longitude']
+        
+        # property_type, room_type, cancellation_policy
+        df_listing = pd.get_dummies(df_listing, columns=['property_type', 'room_type', 'cancellation_policy'])
 
         ####################
         # marge and output #
@@ -95,12 +89,45 @@ class DataPreparingTask(luigi.Task):
         with open(self.output().path, "wb") as target:
             pickle.dump(df_intermediate, target)
 
-    def output(self):
-        return luigi.LocalTarget(self.intermediate_data_path)
+    def __getGooglePlaceData(self, df_listing):
+        # TODO:This should be managed with DB
+        neighborhood_data_filepath = self.intermediate_data_path + self.neighborhood_data_file + self.radius + '.pkl'
+        if os.path.exists(neighborhood_data_filepath):
+            df_neighborhood = pd.read_pickle(neighborhood_data_filepath)
+        else:
+            df_neighborhood = pd.DataFrame([], columns=['latitude', 'longitude', 'results', 'created'])
 
-    def get_neighborhood(lat, lon):
-        # I can apply a function to rows of a dataframe
-        return
+        for index, row in df_listing.iterrows():
+            # Because the difference is less than 10m, round off to the four decimal places
+            latitude_round = round(row.latitude, 4)
+            longitude_round = round(row.longitude, 4)
+
+            # find of neighborhood data
+            neighborhood = df_neighborhood[(df_neighborhood['latitude'] == latitude_round) & (df_neighborhood['longitude'] == longitude_round)]
+
+            # get only when there is no data
+            if neighborhood.empty:
+                # if not exist, get data from api
+                response = requests.get(self.google_places_api_url + 
+                            'key=' + self.api_key + 
+                            '&location=' + str(latitude_round) + ',' + str(longitude_round) + 
+                            '&radius=' + self.radius + 
+                            '&language=' + self.language)
+                data = response.json()
+
+                neighborhood = pd.DataFrame([latitude_round, longitude_round, data['results'], time.time()], index=df_neighborhood.columns).T
+                df_neighborhood = df_neighborhood.append(neighborhood)
+
+                with open(neighborhood_data_filepath, "wb") as target:
+                    pickle.dump(df_neighborhood, target)
+
+            for result in neighborhood.at[0, 'results']:
+                column_name = 'neighborhood_' + result['types'][0]
+                if not column_name in df_listing.columns:
+                    df_listing[column_name] = 0
+                df_listing.loc[index, column_name] += 1
+
+        return df_listing
 
 class CreateModelTask(luigi.Task):
     def requires(self):
@@ -108,10 +135,10 @@ class CreateModelTask(luigi.Task):
 
     def run(self):
         with open(self.input().path, 'rb') as f:
-            dt_intermediate = pickle.load(f)
+            df_intermediate = pickle.load(f)
 
-        y = dt_intermediate['price_amount']
-        X = dt_intermediate.drop('price_amount', axis=1)
+        y = df_intermediate['price_amount']
+        X = df_intermediate.drop('price_amount', axis=1)
 
         # 
         mod = sm.OLS(y, sm.add_constant(X))
@@ -125,4 +152,5 @@ class CreateModelTask(luigi.Task):
 
 
 if __name__ == '__main__':
+    # luigi.run(['DataPreparingTask', '--workers', '1', '--local-scheduler'])
     luigi.run(['CreateModelTask', '--workers', '1', '--local-scheduler'])
